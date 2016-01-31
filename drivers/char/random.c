@@ -754,6 +754,8 @@ void add_device_randomness(const void *buf, unsigned int size)
 }
 EXPORT_SYMBOL(add_device_randomness);
 
+static struct timer_rand_state input_timer_state = INIT_TIMER_RAND_STATE;
+
 /*
  * This function adds entropy to the entropy "pool" by using timing
  * delays.  It uses the timer_rand_state structure to make an estimate
@@ -822,7 +824,16 @@ static void add_timer_randomness(struct timer_rand_state *state, unsigned num)
 void add_input_randomness(unsigned int type, unsigned int code,
 				 unsigned int value)
 {
-	return;
+	static unsigned char last_value;
+
+	/* ignore autorepeat and the like */
+	if (value == last_value)
+		return;
+
+	last_value = value;
+	add_timer_randomness(&input_timer_state,
+			     (type << 4) ^ code ^ (code >> 4) ^ value);
+	trace_add_input_randomness(ENTROPY_BITS(&input_pool));
 }
 EXPORT_SYMBOL_GPL(add_input_randomness);
 
@@ -1093,16 +1104,6 @@ static void extract_buf(struct entropy_store *r, __u8 *out)
 	 */
 	__mix_pool_bytes(r, hash.w, sizeof(hash.w));
 	spin_unlock_irqrestore(&r->lock, flags);
-<<<<<<< HEAD
-
-	/*
-	 * To avoid duplicates, we atomically extract a portion of the
-	 * pool while mixing, and hash one final time.
-	 */
-	sha_transform(hash.w, extract, workspace);
-	memset(extract, 0, sizeof(extract));
-=======
->>>>>>> 8663b7a... random: squash commits from upstream close to 3.18 state
 	memset(workspace, 0, sizeof(workspace));
 
 	/*
@@ -1343,9 +1344,6 @@ void rand_initialize_disk(struct gendisk *disk)
  */
 static int arch_random_refill(void)
 {
-<<<<<<< HEAD
-	return extract_entropy_user(&nonblocking_pool, buf, nbytes);
-=======
 	const unsigned int nlongs = 64;	/* Arbitrary number */
 	unsigned int n = 0;
 	unsigned int i;
@@ -1403,7 +1401,6 @@ random_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 		if (signal_pending(current))
 			return -ERESTARTSYS;
 	}
->>>>>>> 8663b7a... random: squash commits from upstream close to 3.18 state
 }
 
 static ssize_t
