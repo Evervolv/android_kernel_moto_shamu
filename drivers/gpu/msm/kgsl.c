@@ -1,4 +1,4 @@
-/* Copyright (c) 2008-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2008-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -234,7 +234,7 @@ kgsl_mem_entry_destroy(struct kref *kref)
 		for_each_sg(entry->memdesc.sg, sg, entry->memdesc.sglen, i) {
 			page = sg_page(sg);
 			for (j = 0; j < (sg->length >> PAGE_SHIFT); j++)
-				set_page_dirty(nth_page(page, j));
+				set_page_dirty_lock(nth_page(page, j));
 		}
 	}
 
@@ -1168,6 +1168,9 @@ kgsl_sharedmem_find_region(struct kgsl_process_private *private,
 {
 	struct rb_node *node;
 
+	if (!private)
+		return NULL;
+
 	if (!kgsl_mmu_gpuaddr_in_range(private->pagetable, gpuaddr))
 		return NULL;
 
@@ -1595,8 +1598,12 @@ EXPORT_SYMBOL(kgsl_cmdbatch_destroy_object);
 /*
  * a generic function to retire a pending sync event and (possibly)
  * kick the dispatcher
+ * Returns false if the event was already marked for cancellation in another
+ * thread. This function should return true if this thread is responsible for
+ * freeing up the memory, and the event will not be cancelled.
  */
-static void kgsl_cmdbatch_sync_expire(struct kgsl_device *device,
+
+static bool kgsl_cmdbatch_sync_expire(struct kgsl_device *device,
 	struct kgsl_cmdbatch_sync_event *event)
 {
 	struct kgsl_cmdbatch_sync_event *e, *tmp;
@@ -1619,6 +1626,11 @@ static void kgsl_cmdbatch_sync_expire(struct kgsl_device *device,
 		}
 	}
 
+	if (removed == 0) {
+		spin_unlock_irqrestore(&event->cmdbatch->lock, flags);
+		return false;
+	}
+
 	sched = list_empty(&event->cmdbatch->synclist) ? 1 : 0;
 	spin_unlock_irqrestore(&event->cmdbatch->lock, flags);
 
@@ -1637,6 +1649,8 @@ static void kgsl_cmdbatch_sync_expire(struct kgsl_device *device,
 	/* Put events that have been removed from the synclist */
 	if (removed)
 		kgsl_cmdbatch_sync_event_put(event);
+
+	return true;
 }
 
 
@@ -1648,9 +1662,13 @@ static void kgsl_cmdbatch_sync_func(struct kgsl_device *device,
 		struct kgsl_context *context, void *priv, int result)
 {
 	struct kgsl_cmdbatch_sync_event *event = priv;
+	/*
+         * Put down the context ref count only if
+         * this thread successfully clears the pending bit mask.
+         */
+	if (kgsl_cmdbatch_sync_expire(device, event))
+		kgsl_context_put(event->context);
 
-	kgsl_cmdbatch_sync_expire(device, event);
-	kgsl_context_put(event->context);
 	/* Put events that have signaled */
 	kgsl_cmdbatch_sync_event_put(event);
 }
@@ -1696,6 +1714,12 @@ void kgsl_cmdbatch_destroy(struct kgsl_cmdbatch *cmdbatch)
 			kgsl_cancel_event(cmdbatch->device,
 				&event->context->events, event->timestamp,
 				kgsl_cmdbatch_sync_func, event);
+			/*
+                         * Do context put here to make sure the context is alive
+                         * till this thread cancels kgsl event.
+                         */
+                        kgsl_context_put(event->context);
+
 		} else if (event->type == KGSL_CMD_SYNCPOINT_TYPE_FENCE) {
 			/* Put events that are successfully canceled */
 			if (kgsl_sync_fence_async_cancel(event->handle))
@@ -2609,11 +2633,14 @@ static int check_vma(struct vm_area_struct *vma, struct file *vmfile,
 
 static int memdesc_sg_virt(struct kgsl_memdesc *memdesc, struct file *vmfile)
 {
-	int i, ret = 0;
-	long npages = 0;
+	int ret = 0;
+	long npages = 0, i;
 	unsigned long sglen = memdesc->size / PAGE_SIZE;
 	struct page **pages = NULL;
 	int write = ((memdesc->flags & KGSL_MEMFLAGS_GPUREADONLY) ? 0 : 1);
+
+	if (sglen == 0 || sglen >= LONG_MAX)
+		return -EINVAL;
 
 	pages = kgsl_malloc(sglen * sizeof(struct page *));
 	if (pages == NULL)
@@ -2644,7 +2671,7 @@ static int memdesc_sg_virt(struct kgsl_memdesc *memdesc, struct file *vmfile)
 	if (ret)
 		goto out;
 
-	if (npages != sglen) {
+	if ((unsigned long) npages != sglen) {
 		ret = -EINVAL;
 		goto out;
 	}
@@ -3130,8 +3157,9 @@ long kgsl_ioctl_gpumem_sync_cache(struct kgsl_device_private *dev_priv,
 static int mem_id_cmp(const void *_a, const void *_b)
 {
 	const unsigned int *a = _a, *b = _b;
-	int cmp = a - b;
-	return (cmp < 0) ? -1 : (cmp > 0);
+	if (*a == *b)
+		return 0;
+	return (*a > *b) ? 1 : -1;
 }
 
 long kgsl_ioctl_gpumem_sync_cache_bulk(struct kgsl_device_private *dev_priv,
@@ -3166,7 +3194,7 @@ long kgsl_ioctl_gpumem_sync_cache_bulk(struct kgsl_device_private *dev_priv,
 		goto end;
 	}
 	/* sort the ids so we can weed out duplicates */
-	sort(id_list, param->count, sizeof(int), mem_id_cmp, NULL);
+	sort(id_list, param->count, sizeof(*id_list), mem_id_cmp, NULL);
 
 	for (i = 0; i < param->count; i++) {
 		unsigned int cachemode;
@@ -3268,6 +3296,9 @@ static int kgsl_filter_cachemode(unsigned int flags)
 }
 #endif
 
+/* The largest allowable alignment for a GPU object is 32MB */
+#define KGSL_MAX_ALIGN (32 * SZ_1M)
+
 /*
  * The common parts of kgsl_ioctl_gpumem_alloc and kgsl_ioctl_gpumem_alloc_id.
  */
@@ -3294,11 +3325,13 @@ _gpumem_alloc(struct kgsl_device_private *dev_priv,
 	/* Cap the alignment bits to the highest number we can handle */
 
 	align = (flags & KGSL_MEMALIGN_MASK) >> KGSL_MEMALIGN_SHIFT;
-	if (align >= 32) {
-		KGSL_CORE_ERR("Alignment too big, restricting to 2^31\n");
+	if (align >= ilog2(KGSL_MAX_ALIGN)) {
+		KGSL_CORE_ERR("Alignment too large; restricting to %dK\n",
+			KGSL_MAX_ALIGN >> 10);
 
 		flags &= ~KGSL_MEMALIGN_MASK;
-		flags |= (31 << KGSL_MEMALIGN_SHIFT) & KGSL_MEMALIGN_MASK;
+		flags |= (ilog2(KGSL_MAX_ALIGN) << KGSL_MEMALIGN_SHIFT) &
+			KGSL_MEMALIGN_MASK;
 	}
 
 	flags = kgsl_filter_cachemode(flags);
@@ -4537,7 +4570,7 @@ static void kgsl_core_exit(void)
 static int __init kgsl_core_init(void)
 {
 	int result = 0;
-	struct sched_param param = { .sched_priority = 2 };
+	struct sched_param param = { .sched_priority = 16 };
 
 	/* alloc major and minor device numbers */
 	result = alloc_chrdev_region(&kgsl_driver.major, 0, KGSL_DEVICE_MAX,

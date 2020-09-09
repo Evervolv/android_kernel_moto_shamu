@@ -20,13 +20,8 @@
 #include <linux/regulator/rpm-smd-regulator.h>
 #include <linux/regulator/consumer.h>
 
-/*#define CONFIG_MSMB_CAMERA_DEBUG*/
 #undef CDBG
-#ifdef CONFIG_MSMB_CAMERA_DEBUG
-#define CDBG(fmt, args...) pr_err(fmt, ##args)
-#else
-#define CDBG(fmt, args...) do { } while (0)
-#endif
+#define CDBG(fmt, args...) pr_debug(fmt, ##args)
 
 static int32_t msm_camera_get_power_settimgs_from_sensor_lib(
 	struct msm_camera_power_ctrl_t *power_info,
@@ -962,7 +957,7 @@ int msm_sensor_config(struct msm_sensor_ctrl_t *s_ctrl, void __user *argp)
 				break;
 			}
 			s_ctrl->sensor_state = MSM_SENSOR_POWER_UP;
-			pr_err("%s:%d sensor state %d\n", __func__, __LINE__,
+			pr_info("%s:%d sensor state %d\n", __func__, __LINE__,
 				s_ctrl->sensor_state);
 		} else {
 			rc = -EFAULT;
@@ -989,7 +984,7 @@ int msm_sensor_config(struct msm_sensor_ctrl_t *s_ctrl, void __user *argp)
 				break;
 			}
 			s_ctrl->sensor_state = MSM_SENSOR_POWER_DOWN;
-			pr_err("%s:%d sensor state %d\n", __func__, __LINE__,
+			pr_info("%s:%d sensor state %d\n", __func__, __LINE__,
 				s_ctrl->sensor_state);
 		} else {
 			rc = -EFAULT;

@@ -407,13 +407,14 @@ static int qseecom_register_listener(struct qseecom_dev_handle *data,
 		return -ENOMEM;
 	}
 
-	data->listener.id = rcvd_lstnr.listener_id;
 	init_waitqueue_head(&new_entry->rcv_req_wq);
 
 	spin_lock_irqsave(&qseecom.registered_listener_list_lock, flags);
 	list_add_tail(&new_entry->list, &qseecom.registered_listener_list_head);
 	spin_unlock_irqrestore(&qseecom.registered_listener_list_lock, flags);
 
+	data->listener.id = rcvd_lstnr.listener_id;
+	pr_debug("Service %d is registered\n", rcvd_lstnr.listener_id);
 	return ret;
 }
 
@@ -426,6 +427,11 @@ static int qseecom_unregister_listener(struct qseecom_dev_handle *data)
 	struct qseecom_registered_listener_list *ptr_svc = NULL;
 	struct qseecom_command_scm_resp resp;
 	struct ion_handle *ihandle = NULL;		/* Retrieve phy addr */
+
+	if (data->released) {
+		pr_err("Don't unregister lsnr %d\n", data->listener.id);
+		return -EINVAL;
+	}
 
 	req.qsee_cmd_id = QSEOS_DEREGISTER_LISTENER;
 	req.listener_id = data->listener.id;
@@ -1118,7 +1124,8 @@ static int qseecom_unmap_ion_allocated_memory(struct qseecom_dev_handle *data)
 	if (!IS_ERR_OR_NULL(data->client.ihandle)) {
 		ion_unmap_kernel(qseecom.ion_clnt, data->client.ihandle);
 		ion_free(qseecom.ion_clnt, data->client.ihandle);
-		data->client.ihandle = NULL;
+		memset((void *)&data->client,
+			0, sizeof(struct qseecom_client_handle));
 	}
 	return ret;
 }
@@ -4679,15 +4686,14 @@ exit_unreg_chrdev_region:
 static int qseecom_remove(struct platform_device *pdev)
 {
 	struct qseecom_registered_kclient_list *kclient = NULL;
+	struct qseecom_registered_kclient_list *kclient_tmp = NULL;
 	unsigned long flags = 0;
 	int ret = 0;
 
 	spin_lock_irqsave(&qseecom.registered_kclient_list_lock, flags);
 
-	list_for_each_entry(kclient, &qseecom.registered_kclient_list_head,
-								list) {
-		if (!kclient)
-			goto exit_irqrestore;
+	list_for_each_entry_safe(kclient, kclient_tmp,
+		&qseecom.registered_kclient_list_head, list) {
 
 		/* Break the loop if client handle is NULL */
 		if (!kclient->handle)
@@ -4709,7 +4715,7 @@ exit_free_kc_handle:
 	kzfree(kclient->handle);
 exit_free_kclient:
 	kzfree(kclient);
-exit_irqrestore:
+
 	spin_unlock_irqrestore(&qseecom.registered_kclient_list_lock, flags);
 
 	if (qseecom.qseos_version > QSEEE_VERSION_00)

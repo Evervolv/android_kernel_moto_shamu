@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -833,6 +833,7 @@ int msm_vidc_release_buffers(void *instance, int buffer_type)
 	}
 
 free_and_unmap:
+	mutex_lock(&inst->sync_lock);
 	mutex_lock(&inst->lock);
 	list_for_each_safe(ptr, next, &inst->registered_bufs) {
 		bi = list_entry(ptr, struct buffer_info, list);
@@ -853,6 +854,7 @@ free_and_unmap:
 		}
 	}
 	mutex_unlock(&inst->lock);
+	mutex_unlock(&inst->sync_lock);
 	return rc;
 }
 EXPORT_SYMBOL(msm_vidc_release_buffers);
@@ -1404,7 +1406,9 @@ static void cleanup_instance(struct msm_vidc_inst *inst)
 		mutex_unlock(&inst->lock);
 		msm_smem_delete_client(inst->mem_client);
 		debugfs_remove_recursive(inst->debugfs_root);
-		WARN_ON(!list_empty(&inst->pending_getpropq));
+
+		WARN_ON(!list_empty(&inst->pending_getpropq)
+			&& (msm_vidc_debug & VIDC_INFO));
 	}
 }
 
@@ -1418,7 +1422,7 @@ int msm_vidc_close(void *instance)
 	int rc = 0;
 	int i;
 
-	if (!inst)
+	if (!inst || !inst->core)
 		return -EINVAL;
 
 	v4l2_fh_del(&inst->event_handler);
@@ -1436,6 +1440,8 @@ int msm_vidc_close(void *instance)
 	}
 
 	core = inst->core;
+	msm_comm_session_clean(inst);
+
 	mutex_lock(&core->lock);
 	list_for_each_safe(ptr, next, &core->instances) {
 		temp = list_entry(ptr, struct msm_vidc_inst, list);

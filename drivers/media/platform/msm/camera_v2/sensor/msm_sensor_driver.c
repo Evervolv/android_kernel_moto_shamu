@@ -19,13 +19,8 @@
 #include "msm_camera_dt_util.h"
 
 /* Logging macro */
-/*#define MSM_SENSOR_DRIVER_DEBUG*/
 #undef CDBG
-#ifdef MSM_SENSOR_DRIVER_DEBUG
-#define CDBG(fmt, args...) pr_err(fmt, ##args)
-#else
 #define CDBG(fmt, args...) pr_debug(fmt, ##args)
-#endif
 
 #define SENSOR_MAX_MOUNTANGLE (360)
 
@@ -816,7 +811,7 @@ int32_t msm_sensor_driver_probe(void *setting)
 		goto FREE_CAMERA_INFO;
 	}
 
-	pr_err("%s probe succeeded", slave_info->sensor_name);
+	pr_info("%s probe succeeded\n", slave_info->sensor_name);
 
 	/* Save sensor info*/
 	s_ctrl->sensordata->cam_slave_info = slave_info;

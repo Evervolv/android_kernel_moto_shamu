@@ -17,12 +17,9 @@
 #include "msm_cci.h"
 
 /*#define CONFIG_MSM_CAMERA_DT_DEBUG*/
+
 #undef CDBG
-#ifdef CONFIG_MSM_CAMERA_DT_DEBUG
-#define CDBG(fmt, args...) pr_err(fmt, ##args)
-#else
-#define CDBG(fmt, args...) do { } while (0)
-#endif
+#define CDBG(fmt, args...) pr_debug(fmt, ##args)
 
 int msm_camera_fill_vreg_params(struct camera_vreg_t *cam_vreg,
 	int num_vreg, struct msm_sensor_power_setting *power_setting,
@@ -52,7 +49,7 @@ int msm_camera_fill_vreg_params(struct camera_vreg_t *cam_vreg,
 		case CAM_VDIG:
 			for (j = 0; j < num_vreg; j++) {
 				if (!strcmp(cam_vreg[j].reg_name, "cam_vdig")) {
-					pr_err("%s:%d i %d j %d cam_vdig\n",
+					pr_info("%s:%d i %d j %d cam_vdig\n",
 						__func__, __LINE__, i, j);
 					power_setting[i].seq_val = j;
 					break;
@@ -63,7 +60,7 @@ int msm_camera_fill_vreg_params(struct camera_vreg_t *cam_vreg,
 		case CAM_VIO:
 			for (j = 0; j < num_vreg; j++) {
 				if (!strcmp(cam_vreg[j].reg_name, "cam_vio")) {
-					pr_err("%s:%d i %d j %d cam_vio\n",
+					pr_info("%s:%d i %d j %d cam_vio\n",
 						__func__, __LINE__, i, j);
 					power_setting[i].seq_val = j;
 					break;
@@ -74,7 +71,7 @@ int msm_camera_fill_vreg_params(struct camera_vreg_t *cam_vreg,
 		case CAM_VANA:
 			for (j = 0; j < num_vreg; j++) {
 				if (!strcmp(cam_vreg[j].reg_name, "cam_vana")) {
-					pr_err("%s:%d i %d j %d cam_vana\n",
+					pr_info("%s:%d i %d j %d cam_vana\n",
 						__func__, __LINE__, i, j);
 					power_setting[i].seq_val = j;
 					break;
@@ -85,7 +82,7 @@ int msm_camera_fill_vreg_params(struct camera_vreg_t *cam_vreg,
 		case CAM_VAF:
 			for (j = 0; j < num_vreg; j++) {
 				if (!strcmp(cam_vreg[j].reg_name, "cam_vaf")) {
-					pr_err("%s:%d i %d j %d cam_vaf\n",
+					pr_info("%s:%d i %d j %d cam_vaf\n",
 						__func__, __LINE__, i, j);
 					power_setting[i].seq_val = j;
 					break;

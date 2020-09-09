@@ -20,11 +20,7 @@
 #include "msm_eeprom.h"
 
 #undef CDBG
-#ifdef MSM_EEPROM_DEBUG
-#define CDBG(fmt, args...) pr_err(fmt, ##args)
-#else
 #define CDBG(fmt, args...) pr_debug(fmt, ##args)
-#endif
 
 DEFINE_MSM_MUTEX(msm_eeprom_mutex);
 
@@ -614,7 +610,7 @@ static int msm_eeprom_get_dt_data(struct msm_eeprom_ctrl_t *e_ctrl)
 		&e_ctrl->eboard_info->power_info;
 	struct device_node *of_node = NULL;
 	struct msm_camera_gpio_conf *gconf = NULL;
-	uint16_t gpio_array_size = 0;
+	int8_t gpio_array_size = 0;
 	uint16_t *gpio_array = NULL;
 
 	eb_info = e_ctrl->eboard_info;
@@ -649,7 +645,7 @@ static int msm_eeprom_get_dt_data(struct msm_eeprom_ctrl_t *e_ctrl)
 	gpio_array_size = of_gpio_count(of_node);
 	CDBG("%s gpio count %d\n", __func__, gpio_array_size);
 
-	if (gpio_array_size) {
+	if (gpio_array_size > 0) {
 		gpio_array = kzalloc(sizeof(uint16_t) * gpio_array_size,
 			GFP_KERNEL);
 		if (!gpio_array) {

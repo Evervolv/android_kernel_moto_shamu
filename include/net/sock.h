@@ -406,6 +406,11 @@ struct sock {
 	void                    (*sk_destruct)(struct sock *sk);
 };
 
+#define __sk_user_data(sk) ((*((void __rcu **)&(sk)->sk_user_data)))
+
+#define rcu_dereference_sk_user_data(sk)	rcu_dereference(__sk_user_data((sk)))
+#define rcu_assign_sk_user_data(sk, ptr)	rcu_assign_pointer(__sk_user_data((sk)), ptr)
+
 /*
  * SK_CAN_REUSE and SK_NO_REUSE on a socket mean that the socket is OK
  * or not whether his port will be reused by someone else. SK_FORCE_REUSE
@@ -1255,7 +1260,7 @@ static inline void sk_sockets_allocated_inc(struct sock *sk)
 	percpu_counter_inc(prot->sockets_allocated);
 }
 
-static inline int
+static inline u64
 sk_sockets_allocated_read_positive(struct sock *sk)
 {
 	struct proto *prot = sk->sk_prot;
@@ -1704,7 +1709,6 @@ static inline int sk_tx_queue_get(const struct sock *sk)
 
 static inline void sk_set_socket(struct sock *sk, struct socket *sock)
 {
-	sk_tx_queue_clear(sk);
 	sk->sk_socket = sock;
 }
 

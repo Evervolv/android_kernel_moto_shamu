@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2015, 2017-2018 The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2018, 2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -24,6 +24,7 @@
 #include <linux/spinlock.h>
 #include <linux/ratelimit.h>
 #include <linux/reboot.h>
+#include <linux/vmalloc.h>
 #include <asm/current.h>
 #include <mach/restart.h>
 #ifdef CONFIG_DIAG_OVER_USB
@@ -785,8 +786,11 @@ void extract_dci_pkt_rsp(unsigned char *buf, int len, int data_source,
 	struct diag_dci_buffer_t *rsp_buf = NULL;
 	struct dci_pkt_req_entry_t *req_entry = NULL;
 	unsigned char *temp = buf;
+	int save_req_uid = 0;
+	struct diag_dci_pkt_rsp_header_t pkt_rsp_header;
+	int header_len = sizeof(struct diag_dci_pkt_rsp_header_t);
 
-	if (!buf) {
+	if (!buf || len <= 0) {
 		pr_err("diag: Invalid pointer in %s\n", __func__);
 		return;
 	}
@@ -800,6 +804,8 @@ void extract_dci_pkt_rsp(unsigned char *buf, int len, int data_source,
 								dci_cmd_code);
 		return;
 	}
+	if (len < (cmd_code_len + sizeof(int)))
+		return;
 	temp += cmd_code_len;
 	tag = *(int *)temp;
 	temp += sizeof(int);
@@ -808,10 +814,16 @@ void extract_dci_pkt_rsp(unsigned char *buf, int len, int data_source,
 	 * The size of the response is (total length) - (length of the command
 	 * code, the tag (int)
 	 */
-	rsp_len = len - (cmd_code_len + sizeof(int));
-	if ((rsp_len == 0) || (rsp_len > (len - 5))) {
-		pr_err("diag: Invalid length in %s, len: %d, rsp_len: %d",
-						__func__, len, rsp_len);
+	if (len >= cmd_code_len + sizeof(int)) {
+		rsp_len = len - (cmd_code_len + sizeof(int));
+		if ((rsp_len == 0) || (rsp_len > (len - 5))) {
+			pr_err("diag: Invalid length in %s, len: %d, rsp_len: %d\n",
+					__func__, len, rsp_len);
+			return;
+		}
+	} else {
+		pr_err("diag:%s: Invalid length(%d) for calculating rsp_len\n",
+			__func__, len);
 		return;
 	}
 
@@ -828,6 +840,7 @@ void extract_dci_pkt_rsp(unsigned char *buf, int len, int data_source,
 		return;
 	}
 
+	save_req_uid = req_entry->uid;
 	/* Remove the headers and send only the response to this function */
 	delete_flag = diag_dci_remove_req_entry(temp, rsp_len, req_entry);
 	if (delete_flag < 0)
@@ -838,31 +851,32 @@ void extract_dci_pkt_rsp(unsigned char *buf, int len, int data_source,
 	mutex_lock(&rsp_buf->data_mutex);
 	/*
 	 * Check if we can fit the data in the rsp buffer. The total length of
-	 * the rsp is the rsp length (write_len) + DCI_PKT_RSP_TYPE header (int)
-	 * + field for length (int) + delete_flag (uint8_t)
+	 * the rsp is the rsp length (write_len) + dci response packet header
+	 * length (sizeof(struct diag_dci_pkt_rsp_header_t))
 	 */
-	if ((rsp_buf->data_len + 9 + rsp_len) > rsp_buf->capacity) {
+	if ((rsp_buf->data_len + header_len + rsp_len) > rsp_buf->capacity) {
 		pr_alert("diag: create capacity for pkt rsp\n");
-		rsp_buf->capacity += 9 + rsp_len;
-		temp_buf = krealloc(rsp_buf->data, rsp_buf->capacity,
-				    GFP_KERNEL);
+		temp_buf = vzalloc(rsp_buf->capacity + header_len + rsp_len);
 		if (!temp_buf) {
 			pr_err("diag: DCI realloc failed\n");
 			mutex_unlock(&rsp_buf->data_mutex);
 			return;
-		} else {
-			rsp_buf->data = temp_buf;
 		}
+		rsp_buf->capacity += header_len + rsp_len;
+		if (rsp_buf->capacity > rsp_buf->data_len)
+			memcpy(temp_buf, rsp_buf->data, rsp_buf->data_len);
+		vfree(rsp_buf->data);
+		rsp_buf->data = temp_buf;
 	}
-	*(int *)(rsp_buf->data + rsp_buf->data_len) = DCI_PKT_RSP_TYPE;
-	rsp_buf->data_len += sizeof(int);
+
+	/* Fill in packet response header information */
+	pkt_rsp_header.type = DCI_PKT_RSP_TYPE;
 	/* Packet Length = Response Length + Length of uid field (int) */
-	*(int *)(rsp_buf->data + rsp_buf->data_len) = rsp_len + sizeof(int);
-	rsp_buf->data_len += sizeof(int);
-	*(uint8_t *)(rsp_buf->data + rsp_buf->data_len) = delete_flag;
-	rsp_buf->data_len += sizeof(uint8_t);
-	*(int *)(rsp_buf->data + rsp_buf->data_len) = req_entry->uid;
-	rsp_buf->data_len += sizeof(int);
+	pkt_rsp_header.length = rsp_len + sizeof(int);
+	pkt_rsp_header.delete_flag = delete_flag;
+	pkt_rsp_header.uid = save_req_uid;
+	memcpy(rsp_buf->data + rsp_buf->data_len, &pkt_rsp_header, header_len);
+	rsp_buf->data_len += header_len;
 	memcpy(rsp_buf->data + rsp_buf->data_len, temp, rsp_len);
 	rsp_buf->data_len += rsp_len;
 	rsp_buf->data_source = data_source;
@@ -1236,10 +1250,12 @@ void diag_update_smd_dci_work_fn(struct work_struct *work)
 
 void diag_dci_notify_client(int peripheral_mask, int data, int proc)
 {
-	int stat;
+	int stat = 0;
 	struct siginfo info;
 	struct list_head *start, *temp;
 	struct diag_dci_client_tbl *entry = NULL;
+	struct pid *pid_struct = NULL;
+	struct task_struct *dci_task = NULL;
 
 	memset(&info, 0, sizeof(struct siginfo));
 	info.si_code = SI_QUEUE;
@@ -1256,11 +1272,30 @@ void diag_dci_notify_client(int peripheral_mask, int data, int proc)
 			continue;
 		if (entry->client_info.notification_list & peripheral_mask) {
 			info.si_signo = entry->client_info.signal_type;
-			stat = send_sig_info(entry->client_info.signal_type,
-					     &info, entry->client);
-			if (stat)
-				pr_err("diag: Err sending dci signal to client, signal data: 0x%x, stat: %d\n",
+			pid_struct = find_get_pid(entry->tgid);
+			if (pid_struct) {
+				dci_task = get_pid_task(pid_struct,
+						PIDTYPE_PID);
+				if (!dci_task) {
+					pr_debug("diag: dci client with pid = %d Exited..\n",
+						entry->tgid);
+					mutex_unlock(&driver->dci_mutex);
+					return;
+				}
+				if (entry->client &&
+					entry->tgid == dci_task->tgid) {
+					pr_debug("entry tgid = %d, dci client tgid = %d\n",
+						entry->tgid, dci_task->tgid);
+					stat = send_sig_info(
+						entry->client_info.signal_type,
+						&info, dci_task);
+					if (stat)
+						pr_err("diag: Err sending dci signal to client, signal data: 0x%x, stat: %d\n",
 							info.si_int, stat);
+				} else
+					pr_err("diag: client data is corrupted, signal data: 0x%x, stat: %d\n",
+						info.si_int, stat);
+			}
 		}
 	}
 }
@@ -1713,9 +1748,9 @@ int diag_process_dci_transaction(unsigned char *buf, int len)
 	uint8_t *event_mask_ptr;
 	struct diag_dci_client_tbl *dci_entry = NULL;
 
-	if (!temp) {
-		pr_err("diag: Invalid buffer in %s\n", __func__);
-		return -ENOMEM;
+	if (!temp || len < sizeof(int)) {
+		pr_err("diag: Invalid input in %s\n", __func__);
+		return -EINVAL;
 	}
 
 	/* This is Pkt request/response transaction */
@@ -1766,7 +1801,7 @@ int diag_process_dci_transaction(unsigned char *buf, int len)
 		count = 0; /* iterator for extracting log codes */
 
 		while (count < num_codes) {
-			if (read_len >= USER_SPACE_DATA) {
+			if (read_len + sizeof(uint16_t) > len) {
 				pr_err("diag: dci: Invalid length for log type in %s",
 								__func__);
 				return -EIO;
@@ -1871,7 +1906,7 @@ int diag_process_dci_transaction(unsigned char *buf, int len)
 		pr_debug("diag: head of dci event mask %p\n", event_mask_ptr);
 		count = 0; /* iterator for extracting log codes */
 		while (count < num_codes) {
-			if (read_len >= USER_SPACE_DATA) {
+			if (read_len + sizeof(int) > len) {
 				pr_err("diag: dci: Invalid length for event type in %s",
 								__func__);
 				return -EIO;
@@ -1924,14 +1959,30 @@ struct diag_dci_client_tbl *diag_dci_get_client_entry(int client_id)
 	return NULL;
 }
 
-struct diag_dci_client_tbl *dci_lookup_client_entry_pid(int pid)
+struct diag_dci_client_tbl *dci_lookup_client_entry_pid(int tgid)
 {
 	struct list_head *start, *temp;
 	struct diag_dci_client_tbl *entry = NULL;
+	struct pid *pid_struct = NULL;
+	struct task_struct *task_s = NULL;
+
 	list_for_each_safe(start, temp, &driver->dci_client_list) {
 		entry = list_entry(start, struct diag_dci_client_tbl, track);
-		if (entry->client->tgid == pid)
-			return entry;
+		pid_struct = find_get_pid(entry->tgid);
+		if (!pid_struct) {
+			pr_debug("diag: Exited pid (%d) doesn't match dci client of pid (%d)\n",
+			tgid, entry->tgid);
+			continue;
+		}
+		task_s = get_pid_task(pid_struct, PIDTYPE_PID);
+		if (!task_s) {
+			pr_debug("diag: valid task doesn't exist for pid = %d\n",
+				entry->tgid);
+			continue;
+		}
+		if (task_s == entry->client)
+			if (entry->client->tgid == tgid)
+				return entry;
 	}
 	return NULL;
 }
@@ -2659,6 +2710,7 @@ int diag_dci_register_client(struct diag_dci_reg_tbl_t *reg_entry)
 	}
 
 	new_entry->client = current;
+	new_entry->tgid = current->tgid;
 	new_entry->client_info.notification_list =
 				reg_entry->notification_list;
 	new_entry->client_info.signal_type =
